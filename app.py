@@ -1,9 +1,6 @@
 # app.py — HGA Bot • Twilio WhatsApp ↔ OpenAI • Vercel-ready
-# Rotas: "/", /health, /diag/openai, /whatsapp, /status (opcional)
-# Observações:
-# - Twilio envia application/x-www-form-urlencoded → usamos request.form()
-# - Responda TwiML (XML) com escape (&, <, >)
-# - Crie a env var OPENAI_API_KEY na Vercel (formato sk-...)
+# Rotas: "/", /health, /diag/openai, /whatsapp, /status
+# Lê form-urlencoded (Twilio), responde TwiML (XML) e escapa caracteres especiais.
 
 import os, html, sys, traceback
 from fastapi import FastAPI, Request, Response
@@ -13,7 +10,6 @@ app = FastAPI(title="HGA Bot")
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-# ---- Rota raiz (evita 404 ao abrir o domínio) ----
 @app.get("/")
 def index():
     return {
@@ -22,12 +18,10 @@ def index():
         "routes": ["/health", "/diag/openai", "/whatsapp", "/status"]
     }
 
-# ---- Vida ----
 @app.get("/health")
 def health():
     return {"ok": True}
 
-# ---- Diagnóstico da OpenAI ----
 @app.get("/diag/openai")
 async def diag_openai():
     if not OPENAI_API_KEY:
@@ -38,19 +32,22 @@ async def diag_openai():
         payload = {
             "model": "gpt-4o-mini",
             "messages": [{"role":"user","content":"Responda apenas: ok"}],
-            "temperature": 0.1
+            "temperature": 0.1,
+            "max_tokens": 10
         }
-        async with httpx.AsyncClient(timeout=12) as client:
+        async with httpx.AsyncClient(timeout=10) as client:
             r = await client.post(url, headers=headers, json=payload)
-            r.raise_for_status()
-            data = r.json()
-            text = data["choices"][0]["message"]["content"].strip()
+            if r.status_code >= 400:
+                try:
+                    return {"ok": False, "status": r.status_code, "error": r.json()}
+                except Exception:
+                    return {"ok": False, "status": r.status_code, "error_text": r.text}
+            text = r.json()["choices"][0]["message"]["content"].strip()
             return {"ok": True, "text": text}
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": repr(e)}
 
-# ---- Chamada à OpenAI (uso interno) ----
-async def call_openai(prompt: str) -> str:
+async def call_openai_brief(prompt: str) -> str:
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY ausente")
     url = "https://api.openai.com/v1/chat/completions"
@@ -58,22 +55,17 @@ async def call_openai(prompt: str) -> str:
     payload = {
         "model": "gpt-4o-mini",
         "messages": [
-            {"role":"system","content":(
-                "Você é um assistente informativo do escritório Hosken & Geraldino. "
-                "Responda de modo breve e claro, sem aconselhamento jurídico individual "
-                "e sem promessas de resultado. Em urgência, oriente contato humano."
-            )},
+            {"role":"system","content":"Você é um assistente informativo do Hosken & Geraldino. Responda de forma breve e clara, sem aconselhamento jurídico individual."},
             {"role":"user","content": prompt}
         ],
-        "temperature": 0.3
+        "temperature": 0.3,
+        "max_tokens": 180
     }
-    async with httpx.AsyncClient(timeout=12) as client:
+    async with httpx.AsyncClient(timeout=10) as client:
         r = await client.post(url, headers=headers, json=payload)
         r.raise_for_status()
-        data = r.json()
-        return data["choices"][0]["message"]["content"].strip()
+        return r.json()["choices"][0]["message"]["content"].strip()
 
-# ---- Webhook do WhatsApp (Twilio) ----
 @app.post("/whatsapp")
 async def whatsapp(request: Request):
     # Twilio envia application/x-www-form-urlencoded
@@ -82,33 +74,23 @@ async def whatsapp(request: Request):
     except Exception:
         return Response(status_code=415, content="Unsupported Media Type (esperado form-urlencoded)")
 
-    user_text = (form.get("Body") or "").strip()
-
-    # Chamada à OpenAI com timeout/fallback
+    user_text = (form.get("Body") or "").strip() or "Olá! Faça uma pergunta objetiva."
     try:
-        reply = await call_openai(user_text or "Diga olá em uma frase.")
+        ai = await call_openai_brief(user_text)
     except Exception as e:
-        print("OPENAI_ERROR:", str(e), file=sys.stderr)
+        print("OPENAI_ERROR:", repr(e), file=sys.stderr)
         traceback.print_exc()
-        reply = "Recebi sua mensagem e vou encaminhar à nossa equipe. Retornaremos em breve."
+        ai = "Estou com instabilidade de IA no momento; nossa equipe retornará em breve."
 
-    # Rodapé com aviso (OAB/LGPD) + número do Sandbox Twilio
     disclaimer = "[Aviso] Resposta informativa. Não substitui consulta com advogado(a). Contato: (21) 2018-4200 • WhatsApp: +1 415 523 8886"
-    final_text = f"{reply}\n\n{disclaimer}"
-
-    # Escape de XML (&, <, >)
-    final_xml = html.escape(final_text)
-
-    # TwiML
+    final_xml = html.escape(f"{ai}\n\n{disclaimer}")
     twiml = f'<?xml version="1.0" encoding="UTF-8"?><Response><Message>{final_xml}</Message></Response>'
     return Response(content=twiml, media_type="application/xml")
 
-# ---- (Opcional) Callback de status da Twilio ----
 @app.post("/status")
 async def status_callback(request: Request):
     try:
         data = dict((await request.form()).items())
     except Exception:
         data = {"error": "esperado form-urlencoded"}
-    # Aqui você pode salvar em log/DB: MessageSid, MessageStatus, ErrorCode, etc.
     return {"ok": True, "received": data.get("MessageStatus", "unknown")}
