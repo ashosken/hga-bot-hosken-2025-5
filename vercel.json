@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "builds": [{ "src": "app.py", "use": "@vercel/python" }],
+  "routes": [
+    { "src": "/whatsapp", "methods": ["POST"], "dest": "app.py" },
+    { "src": "/health", "dest": "app.py" },
+    { "src": "/diag/openai", "dest": "app.py" },
+    { "src": "/status", "methods": ["POST"], "dest": "app.py" },
+    { "src": "/", "dest": "app.py" }
+  ]
+}
